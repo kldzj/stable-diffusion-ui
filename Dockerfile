@@ -6,8 +6,8 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/cmdr2/stable-diffusion-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') && \
-    curl -L -O https://github.com/cmdr2/stable-diffusion-ui/releases/download/${LATEST_RELEASE}/Easy-Diffusion-Linux.zip && \
+RUN LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/easydiffusion/easydiffusion/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') && \
+    curl -L -O https://github.com/easydiffusion/easydiffusion/releases/download/${LATEST_RELEASE}/Easy-Diffusion-Linux.zip && \
     unzip Easy-Diffusion-Linux.zip && \
     rm Easy-Diffusion-Linux.zip
 
