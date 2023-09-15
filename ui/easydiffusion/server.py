@@ -8,8 +8,19 @@ import os
 import traceback
 from typing import List, Union
 
-from easydiffusion import app, model_manager, task_manager
-from easydiffusion.types import GenerateImageRequest, MergeRequest, TaskData
+from easydiffusion import app, model_manager, task_manager, package_manager
+from easydiffusion.tasks import RenderTask, FilterTask
+from easydiffusion.types import (
+    GenerateImageRequest,
+    FilterImageRequest,
+    MergeRequest,
+    TaskData,
+    RenderTaskData,
+    ModelsData,
+    OutputFormatData,
+    SaveToDiskData,
+    convert_legacy_render_req_to_new,
+)
 from easydiffusion.utils import log
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +38,7 @@ NOCACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+PROTECTED_CONFIG_KEYS = ("block_nsfw",)  # can't change these via the HTTP API
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -54,7 +66,8 @@ class SetAppConfigRequest(BaseModel, extra=Extra.allow):
     ui_open_browser_on_start: bool = None
     listen_to_network: bool = None
     listen_port: int = None
-    test_diffusers: bool = False
+    use_v3_engine: bool = True
+    models_dir: str = None
 
 
 def init():
@@ -86,8 +99,8 @@ def init():
         return set_app_config_internal(req)
 
     @server_api.get("/get/{key:path}")
-    def read_web_data(key: str = None):
-        return read_web_data_internal(key)
+    def read_web_data(key: str = None, scan_for_malicious: bool = True):
+        return read_web_data_internal(key, scan_for_malicious=scan_for_malicious)
 
     @server_api.get("/ping")  # Get server and optionally session status.
     def ping(session_id: str = None):
@@ -96,6 +109,10 @@ def init():
     @server_api.post("/render")
     def render(req: dict):
         return render_internal(req)
+
+    @server_api.post("/filter")
+    def render(req: dict):
+        return filter_internal(req)
 
     @server_api.post("/model/merge")
     def model_merge(req: dict):
@@ -121,6 +138,14 @@ def init():
     @server_api.post("/tunnel/cloudflare/stop")
     def stop_cloudflare_tunnel(req: dict):
         return stop_cloudflare_tunnel_internal(req)
+
+    @server_api.post("/package/{package_name:str}")
+    def modify_package(package_name: str, req: dict):
+        return modify_package_internal(package_name, req)
+
+    @server_api.get("/sha256/{obj_path:path}")
+    def get_sha256(obj_path: str):
+        return get_sha256_internal(obj_path)
 
     @server_api.get("/")
     def read_root():
@@ -151,10 +176,11 @@ def set_app_config_internal(req: SetAppConfigRequest):
             config["net"] = {}
         config["net"]["listen_port"] = int(req.listen_port)
 
-    config["test_diffusers"] = req.test_diffusers
+    config["use_v3_engine"] = req.use_v3_engine
+    config["models_dir"] = req.models_dir
 
     for property, property_value in req.dict().items():
-        if property_value is not None and property not in req.__fields__:
+        if property_value is not None and property not in req.__fields__ and property not in PROTECTED_CONFIG_KEYS:
             config[property] = property_value
 
     try:
@@ -179,11 +205,16 @@ def update_render_devices_in_config(config, render_devices):
     config["render_devices"] = render_devices
 
 
-def read_web_data_internal(key: str = None):
+def read_web_data_internal(key: str = None, **kwargs):
     if not key:  # /get without parameters, stable-diffusion easter egg.
         raise HTTPException(status_code=418, detail="StableDiffusion is drawing a teapot!")  # HTTP418 I'm a teapot
     elif key == "app_config":
-        return JSONResponse(app.getConfig(), headers=NOCACHE_HEADERS)
+        config = app.getConfig()
+
+        if "models_dir" not in config:
+            config["models_dir"] = app.MODELS_DIR
+
+        return JSONResponse(config, headers=NOCACHE_HEADERS)
     elif key == "system_info":
         config = app.getConfig()
 
@@ -198,7 +229,8 @@ def read_web_data_internal(key: str = None):
         system_info["devices"]["config"] = config.get("render_devices", "auto")
         return JSONResponse(system_info, headers=NOCACHE_HEADERS)
     elif key == "models":
-        return JSONResponse(model_manager.getModels(), headers=NOCACHE_HEADERS)
+        scan_for_malicious = kwargs.get("scan_for_malicious", True)
+        return JSONResponse(model_manager.getModels(scan_for_malicious), headers=NOCACHE_HEADERS)
     elif key == "modifiers":
         return JSONResponse(app.get_image_modifiers(), headers=NOCACHE_HEADERS)
     elif key == "ui_plugins":
@@ -212,55 +244,94 @@ def ping_internal(session_id: str = None):
         if task_manager.current_state_error:
             raise HTTPException(status_code=500, detail=str(task_manager.current_state_error))
         raise HTTPException(status_code=500, detail="Render thread is dead.")
+
     if task_manager.current_state_error and not isinstance(task_manager.current_state_error, StopAsyncIteration):
         raise HTTPException(status_code=500, detail=str(task_manager.current_state_error))
+
     # Alive
     response = {"status": str(task_manager.current_state)}
+
     if session_id:
         session = task_manager.get_cached_session(session_id, update_ttl=True)
         response["tasks"] = {id(t): t.status for t in session.tasks}
+
     response["devices"] = task_manager.get_devices()
+    response["packages_installed"] = package_manager.get_installed_packages()
+    response["packages_installing"] = package_manager.installing
+
     if cloudflare.address != None:
         response["cloudflare"] = cloudflare.address
+
     return JSONResponse(response, headers=NOCACHE_HEADERS)
 
 
 def render_internal(req: dict):
     try:
+        req = convert_legacy_render_req_to_new(req)
+
         # separate out the request data into rendering and task-specific data
         render_req: GenerateImageRequest = GenerateImageRequest.parse_obj(req)
-        task_data: TaskData = TaskData.parse_obj(req)
+        task_data: RenderTaskData = RenderTaskData.parse_obj(req)
+        models_data: ModelsData = ModelsData.parse_obj(req)
+        output_format: OutputFormatData = OutputFormatData.parse_obj(req)
+        save_data: SaveToDiskData = SaveToDiskData.parse_obj(req)
 
         # Overwrite user specified save path
         config = app.getConfig()
         if "force_save_path" in config:
-            task_data.save_to_disk_path = config["force_save_path"]
+            save_data.save_to_disk_path = config["force_save_path"]
 
         render_req.init_image_mask = req.get("mask")  # hack: will rename this in the HTTP API in a future revision
 
         app.save_to_config(
-            task_data.use_stable_diffusion_model,
-            task_data.use_vae_model,
-            task_data.use_hypernetwork_model,
+            models_data.model_paths.get("stable-diffusion"),
+            models_data.model_paths.get("vae"),
+            models_data.model_paths.get("hypernetwork"),
             task_data.vram_usage_level,
         )
 
         # enqueue the task
-        new_task = task_manager.render(render_req, task_data)
+        task = RenderTask(render_req, task_data, models_data, output_format, save_data)
+        return enqueue_task(task)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def filter_internal(req: dict):
+    try:
+        filter_req: FilterImageRequest = FilterImageRequest.parse_obj(req)
+        task_data: TaskData = TaskData.parse_obj(req)
+        models_data: ModelsData = ModelsData.parse_obj(req)
+        output_format: OutputFormatData = OutputFormatData.parse_obj(req)
+        save_data: SaveToDiskData = SaveToDiskData.parse_obj(req)
+
+        # enqueue the task
+        task = FilterTask(filter_req, task_data, models_data, output_format, save_data)
+        return enqueue_task(task)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def enqueue_task(task):
+    try:
+        task_manager.enqueue_task(task)
         response = {
             "status": str(task_manager.current_state),
             "queue": len(task_manager.tasks_queue),
-            "stream": f"/image/stream/{id(new_task)}",
-            "task": id(new_task),
+            "stream": f"/image/stream/{task.id}",
+            "task": task.id,
         }
         return JSONResponse(response, headers=NOCACHE_HEADERS)
     except ChildProcessError as e:  # Render thread is dead
         raise HTTPException(status_code=500, detail=f"Rendering thread has died.")  # HTTP500 Internal Server Error
     except ConnectionRefusedError as e:  # Unstarted task pending limit reached, deny queueing too many.
         raise HTTPException(status_code=503, detail=str(e))  # HTTP503 Service Unavailable
-    except Exception as e:
-        log.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 def model_merge_internal(req: dict):
@@ -334,7 +405,8 @@ def get_image_internal(task_id: int, img_id: int):
     except KeyError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-#---- Cloudflare Tunnel ----
+
+# ---- Cloudflare Tunnel ----
 class CloudflareTunnel:
     def __init__(self):
         config = app.getConfig()
@@ -357,23 +429,64 @@ class CloudflareTunnel:
         else:
             return None
 
+
 cloudflare = CloudflareTunnel()
 
+
 def start_cloudflare_tunnel_internal(req: dict):
-   try:
-      cloudflare.start()
-      log.info(f"- Started cloudflare tunnel. Using address: {cloudflare.address}")
-      return JSONResponse({"address":cloudflare.address})
-   except Exception as e:
-      log.error(str(e))
-      log.error(traceback.format_exc())
-      return HTTPException(status_code=500, detail=str(e))
+    try:
+        cloudflare.start()
+        log.info(f"- Started cloudflare tunnel. Using address: {cloudflare.address}")
+        return JSONResponse({"address": cloudflare.address})
+    except Exception as e:
+        log.error(str(e))
+        log.error(traceback.format_exc())
+        return HTTPException(status_code=500, detail=str(e))
+
 
 def stop_cloudflare_tunnel_internal(req: dict):
-   try:
-      cloudflare.stop()
-   except Exception as e:
-      log.error(str(e))
-      log.error(traceback.format_exc())
-      return HTTPException(status_code=500, detail=str(e))
+    try:
+        cloudflare.stop()
+    except Exception as e:
+        log.error(str(e))
+        log.error(traceback.format_exc())
+        return HTTPException(status_code=500, detail=str(e))
 
+
+def modify_package_internal(package_name: str, req: dict):
+    try:
+        cmd = req["command"]
+        if cmd not in ("install", "uninstall"):
+            raise RuntimeError(f"Unknown command: {cmd}")
+
+        cmd = getattr(package_manager, cmd)
+        cmd(package_name)
+
+        return JSONResponse({"status": "OK"}, headers=NOCACHE_HEADERS)
+    except Exception as e:
+        log.error(str(e))
+        log.error(traceback.format_exc())
+        return HTTPException(status_code=500, detail=str(e))
+
+
+def get_sha256_internal(obj_path):
+    import hashlib
+    from easydiffusion.utils import sha256sum
+
+    path = obj_path.split("/")
+    type = path.pop(0)
+
+    try:
+        model_path = model_manager.resolve_model_to_use("/".join(path), type)
+    except Exception as e:
+        log.error(str(e))
+        log.error(traceback.format_exc())
+
+        return HTTPException(status_code=404)
+    try:
+        digest = sha256sum(model_path)
+        return {"digest": digest}
+    except Exception as e:
+        log.error(str(e))
+        log.error(traceback.format_exc())
+        return HTTPException(status_code=500, detail=str(e))

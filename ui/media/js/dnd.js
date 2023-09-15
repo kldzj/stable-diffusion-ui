@@ -268,7 +268,11 @@ const TASK_MAPPING = {
     tiling: {
         name: "Tiling",
         setUI: (val) => {
-            tilingField.value = val
+            if (val === null || val === "None") {
+                tilingField.value = "none"
+            } else {
+                tilingField.value = val
+            }
         },
         readUI: () => tilingField.value,
         parse: (val) => val,
@@ -289,32 +293,78 @@ const TASK_MAPPING = {
         readUI: () => vaeModelField.value,
         parse: (val) => val,
     },
+    use_controlnet_model: {
+        name: "ControlNet model",
+        setUI: (use_controlnet_model) => {
+            controlnetModelField.value = getModelPath(use_controlnet_model, [".pth", ".safetensors"])
+        },
+        readUI: () => controlnetModelField.value,
+        parse: (val) => val,
+    },
+    control_filter_to_apply: {
+        name: "ControlNet Filter",
+        setUI: (control_filter_to_apply) => {
+            controlImageFilterField.value = control_filter_to_apply
+        },
+        readUI: () => controlImageFilterField.value,
+        parse: (val) => val,
+    },
     use_lora_model: {
         name: "LoRA model",
         setUI: (use_lora_model) => {
-            const oldVal = loraModelField.value
-            use_lora_model =
-                use_lora_model === undefined || use_lora_model === null || use_lora_model === "None"
-                    ? ""
-                    : use_lora_model
-
-            if (use_lora_model !== "") {
-                use_lora_model = getModelPath(use_lora_model, [".ckpt", ".safetensors"])
-                use_lora_model = use_lora_model !== "" ? use_lora_model : oldVal
-            }
-            loraModelField.value = use_lora_model
+            let modelPaths = []
+            use_lora_model = Array.isArray(use_lora_model) ? use_lora_model : [use_lora_model]
+            use_lora_model.forEach((m) => {
+                if (m.includes("models\\lora\\")) {
+                    m = m.split("models\\lora\\")[1]
+                } else if (m.includes("models\\\\lora\\\\")) {
+                    m = m.split("models\\\\lora\\\\")[1]
+                } else if (m.includes("models/lora/")) {
+                    m = m.split("models/lora/")[1]
+                }
+                m = m.replaceAll("\\\\", "/")
+                m = getModelPath(m, [".ckpt", ".safetensors"])
+                modelPaths.push(m)
+            })
+            loraModelField.modelNames = modelPaths
         },
-        readUI: () => loraModelField.value,
-        parse: (val) => val,
+        readUI: () => {
+            return loraModelField.modelNames
+        },
+        parse: (val) => {
+            val = !val || val === "None" ? "" : val
+            if (typeof val === "string" && val.includes(",")) {
+                val = val.split(",")
+                val = val.map((v) => v.trim())
+                val = val.map((v) => v.replaceAll("\\", "\\\\"))
+                val = val.map((v) => v.replaceAll('"', ""))
+                val = val.map((v) => v.replaceAll("'", ""))
+                val = val.map((v) => '"' + v + '"')
+                val = "[" + val + "]"
+                val = JSON.parse(val)
+            }
+            val = Array.isArray(val) ? val : [val]
+            return val
+        },
     },
     lora_alpha: {
         name: "LoRA Strength",
         setUI: (lora_alpha) => {
-            loraAlphaField.value = lora_alpha
-            updateLoraAlphaSlider()
+            lora_alpha = Array.isArray(lora_alpha) ? lora_alpha : [lora_alpha]
+            loraModelField.modelWeights = lora_alpha
         },
-        readUI: () => parseFloat(loraAlphaField.value),
-        parse: (val) => parseFloat(val),
+        readUI: () => {
+            return loraModelField.modelWeights
+        },
+        parse: (val) => {
+            if (typeof val === "string" && val.includes(",")) {
+                val = "[" + val.replaceAll("'", '"') + "]"
+                val = JSON.parse(val)
+            }
+            val = Array.isArray(val) ? val : [val]
+            val = val.map((e) => parseFloat(e))
+            return val
+        },
     },
     use_hypernetwork_model: {
         name: "Hypernetwork model",
@@ -426,8 +476,8 @@ function restoreTaskToUI(task, fieldsToSkip) {
     }
 
     if (!("use_lora_model" in task.reqBody)) {
-        loraModelField.value = ""
-        loraModelField.dispatchEvent(new Event("change"))
+        loraModelField.modelNames = []
+        loraModelField.modelWeights = []
     }
 
     // restore the original prompt if provided (e.g. use settings), fallback to prompt as needed (e.g. copy/paste or d&d)
@@ -470,10 +520,23 @@ function restoreTaskToUI(task, fieldsToSkip) {
         )
         initImagePreview.src = task.reqBody.init_image
     }
+
+    // hide/show controlnet picture as needed
+    if (IMAGE_REGEX.test(controlImagePreview.src) && task.reqBody.control_image == undefined) {
+        // hide source image
+        controlImageClearBtn.dispatchEvent(new Event("click"))
+    } else if (task.reqBody.control_image !== undefined) {
+        // listen for inpainter loading event, which happens AFTER the main image loads (which reloads the inpai
+        controlImagePreview.src = task.reqBody.control_image
+    }
 }
 function readUI() {
     const reqBody = {}
     for (const key in TASK_MAPPING) {
+        if (testDiffusers.checked && (key === "use_hypernetwork_model" || key === "hypernetwork_strength")) {
+            continue
+        }
+
         reqBody[key] = TASK_MAPPING[key].readUI()
     }
     return {
@@ -520,6 +583,11 @@ const TASK_TEXT_MAPPING = {
     use_stable_diffusion_model: "Stable Diffusion model",
     use_hypernetwork_model: "Hypernetwork model",
     hypernetwork_strength: "Hypernetwork Strength",
+    use_lora_model: "LoRA model",
+    lora_alpha: "LoRA Strength",
+    use_controlnet_model: "ControlNet model",
+    control_filter_to_apply: "ControlNet Filter",
+    tiling: "Seamless Tiling",
 }
 function parseTaskFromText(str) {
     const taskReqBody = {}

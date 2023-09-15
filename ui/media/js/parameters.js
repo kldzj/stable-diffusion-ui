@@ -16,6 +16,7 @@ var ParameterType = {
  */
 let parametersTable = document.querySelector("#system-settings-table")
 let networkParametersTable = document.querySelector("#system-settings-network-table")
+let installExtrasTable = document.querySelector("#system-settings-install-extras-table")
 
 /**
  * JSDoc style
@@ -97,6 +98,17 @@ var PARAMETERS = [
         ],
     },
     {
+        id: "models_dir",
+        type: ParameterType.custom,
+        icon: "fa-folder-tree",
+        label: "Models Folder",
+        note: "Path to the 'models' folder. Please save and refresh the page after changing this.",
+        saveInAppConfig: true,
+        render: (parameter) => {
+            return `<input id="${parameter.id}" name="${parameter.id}" size="30">`
+        },
+    },
+    {
         id: "block_nsfw",
         type: ParameterType.checkbox,
         label: "Block NSFW images",
@@ -119,6 +131,15 @@ var PARAMETERS = [
         note: "reverse the normal processing order",
         icon: "fa-arrow-down-short-wide",
         default: false,
+    },
+    {
+        id: "extract_lora_from_prompt",
+        type: ParameterType.checkbox,
+        label: "Extract LoRA tags from the prompt",
+        note:
+            "Automatically extract lora tags like &lt;lora:name:0.4&gt; from the prompt, and apply the correct LoRA (if present)",
+        icon: "fa-code",
+        default: true,
     },
     {
         id: "ui_open_browser_on_start",
@@ -185,6 +206,17 @@ var PARAMETERS = [
         default: true,
     },
     {
+        id: "profileName",
+        type: ParameterType.custom,
+        label: "Profile Name",
+        note:
+            "Name of the profile for model manager settings, e.g. thumbnails for embeddings. Use this to have different settings for different users.",
+        render: (parameter) => {
+            return `<input id="${parameter.id}" name="${parameter.id}" value="default" size="12">`
+        },
+        icon: "fa-user-gear",
+    },
+    {
         id: "listen_to_network",
         type: ParameterType.checkbox,
         label: "Make Stable Diffusion available on your network",
@@ -217,13 +249,13 @@ var PARAMETERS = [
         default: false,
     },
     {
-        id: "test_diffusers",
+        id: "use_v3_engine",
         type: ParameterType.checkbox,
-        label: "Test Diffusers",
+        label: "Use the new v3 engine (diffusers)",
         note:
-            "<b>Experimental! Can have bugs!</b> Use upcoming features (like LoRA) in our new engine. Please press Save, then restart the program after changing this.",
+            "Use our new v3 engine, with additional features like LoRA, ControlNet, SDXL, Embeddings, Tiling and lots more! Please press Save, then restart the program after changing this.",
         icon: "fa-bolt",
-        default: false,
+        default: true,
         saveInAppConfig: true,
     },
     {
@@ -233,14 +265,37 @@ var PARAMETERS = [
         note: `<span id="cloudflare-off">Create a VPN tunnel to share your Easy Diffusion instance with your friends. This will
                generate a web server address on the public Internet for your Easy Diffusion instance. </span>
                <div id="cloudflare-on" class="displayNone"><div>This Easy Diffusion server is available on the Internet using the
-               address:</div><div><div id="cloudflare-address"></div><button id="copy-cloudflare-address">Copy</button></div></div>
+               address:</div><div><input id="cloudflare-address" value="" readonly><button id="copy-cloudflare-address">Copy</button></div></div>
                <b>Anyone knowing this address can access your server.</b> The address of your server will change each time
                you share a session.<br>
                Uses <a href="https://try.cloudflare.com/" target="_blank">Cloudflare services</a>.`,
         icon: ["fa-brands", "fa-cloudflare"],
         render: () => '<button id="toggle-cloudflare-tunnel" class="primaryButton">Start</button>',
         table: networkParametersTable,
-    }
+    },
+    {
+        id: "nvidia_tensorrt",
+        type: ParameterType.custom,
+        label: "NVIDIA TensorRT",
+        note: `Faster image generation by converting your Stable Diffusion models to the NVIDIA TensorRT format. You can choose the
+               models to convert. Download size: approximately 2 GB.<br/><br/>
+               <b>Early access version:</b> support for LoRA is still under development.
+               <div id="trt-build-config" class="displayNone">
+                    <h3>Build Config:</h3>
+                    Batch size range:
+                    <label>Min:</label> <input id="trt-build-min-batch" type="number" min="1" value="1" style="width: 40pt" />
+                    <label>Max:</label> <input id="trt-build-max-batch" type="number" min="1" value="1" style="width: 40pt" /><br/><br/>
+                    <b>Build for resolutions</b>:<br/>
+                    <input id="trt-build-res-512" type="checkbox" value="1" /> 512x512 to 768x768<br/>
+                    <input id="trt-build-res-768" type="checkbox" value="1" checked /> 768x768 to 1024x1024<br/>
+                    <input id="trt-build-res-1024" type="checkbox" value="1" /> 1024x1024 to 1280x1280<br/>
+                    <input id="trt-build-res-1280" type="checkbox" value="1" /> 1280x1280 to 1536x1536<br/>
+                    <input id="trt-build-res-1536" type="checkbox" value="1" /> 1536x1536 to 1792x1792<br/>
+               </div>`,
+        icon: "fa-angles-up",
+        render: () => '<button id="toggle-tensorrt-install" class="primaryButton">Install</button>',
+        table: installExtrasTable,
+    },
 ]
 
 function getParameterSettingsEntry(id) {
@@ -315,7 +370,7 @@ function initParameters(parameters) {
             noteElements.push(noteElement)
         }
 
-        if (typeof(parameter.icon) == "string") {
+        if (typeof parameter.icon == "string") {
             parameter.icon = [parameter.icon]
         }
         const icon = parameter.icon ? [createElement("i", undefined, ["fa", ...parameter.icon])] : []
@@ -342,7 +397,7 @@ function initParameters(parameters) {
         let p = parametersTable
         if (parameter.table) {
             p = parameter.table
-        } 
+        }
         p.appendChild(newrow)
 
         parameter.settingsEntry = newrow
@@ -376,7 +431,9 @@ let listenPortField = document.querySelector("#listen_port")
 let useBetaChannelField = document.querySelector("#use_beta_channel")
 let uiOpenBrowserOnStartField = document.querySelector("#ui_open_browser_on_start")
 let confirmDangerousActionsField = document.querySelector("#confirm_dangerous_actions")
-let testDiffusers = document.querySelector("#test_diffusers")
+let testDiffusers = document.querySelector("#use_v3_engine")
+let profileNameField = document.querySelector("#profileName")
+let modelsDirField = document.querySelector("#models_dir")
 
 let saveSettingsBtn = document.querySelector("#save-system-settings-btn")
 
@@ -408,8 +465,6 @@ async function getAppConfig() {
         if (config.update_branch === "beta") {
             useBetaChannelField.checked = true
             document.querySelector("#updateBranchLabel").innerText = "(beta)"
-        } else {
-            getParameterSettingsEntry("test_diffusers").style.display = "none"
         }
         if (config.ui && config.ui.open_browser_on_start === false) {
             uiOpenBrowserOnStartField.checked = false
@@ -420,27 +475,54 @@ async function getAppConfig() {
         if (config.net && config.net.listen_port !== undefined) {
             listenPortField.value = config.net.listen_port
         }
+        modelsDirField.value = config.models_dir
 
-        const testDiffusersEnabled = config.test_diffusers && config.update_branch !== "main"
+        let testDiffusersEnabled = true
+        if (config.use_v3_engine === false) {
+            testDiffusersEnabled = false
+        }
         testDiffusers.checked = testDiffusersEnabled
+        document.querySelector("#test_diffusers").checked = testDiffusers.checked // don't break plugins
+
+        if (config.config_on_startup) {
+            if (config.config_on_startup?.use_v3_engine) {
+                document.body.classList.add("diffusers-enabled-on-startup")
+                document.body.classList.remove("diffusers-disabled-on-startup")
+            } else {
+                document.body.classList.add("diffusers-disabled-on-startup")
+                document.body.classList.remove("diffusers-enabled-on-startup")
+            }
+        }
 
         if (!testDiffusersEnabled) {
             document.querySelector("#lora_model_container").style.display = "none"
-            document.querySelector("#lora_alpha_container").style.display = "none"
             document.querySelector("#tiling_container").style.display = "none"
+            document.querySelector("#controlnet_model_container").style.display = "none"
+            document.querySelector("#hypernetwork_model_container").style.display = ""
+            document.querySelector("#hypernetwork_strength_container").style.display = ""
+            document.querySelector("#negative-embeddings-button").style.display = "none"
 
             document.querySelectorAll("#sampler_name option.diffusers-only").forEach((option) => {
                 option.style.display = "none"
             })
+            IMAGE_STEP_SIZE = 64
+            customWidthField.step = IMAGE_STEP_SIZE
+            customHeightField.step = IMAGE_STEP_SIZE
         } else {
             document.querySelector("#lora_model_container").style.display = ""
-            document.querySelector("#lora_alpha_container").style.display = loraModelField.value ? "" : "none"
             document.querySelector("#tiling_container").style.display = ""
+            document.querySelector("#controlnet_model_container").style.display = ""
+            document.querySelector("#hypernetwork_model_container").style.display = "none"
+            document.querySelector("#hypernetwork_strength_container").style.display = "none"
 
             document.querySelectorAll("#sampler_name option.k_diffusion-only").forEach((option) => {
-                option.disabled = true
+                option.style.display = "none"
             })
             document.querySelector("#clip_skip_config").classList.remove("displayNone")
+            document.querySelector("#embeddings-button").classList.remove("displayNone")
+            IMAGE_STEP_SIZE = 8
+            customWidthField.step = IMAGE_STEP_SIZE
+            customHeightField.step = IMAGE_STEP_SIZE
         }
 
         console.log("get config status response", config)
@@ -572,6 +654,23 @@ function setDeviceInfo(devices) {
     systemInfoEl.querySelector("#system-info-cpu").innerText = cpu
     systemInfoEl.querySelector("#system-info-gpus-all").innerHTML = allGPUs.join("</br>")
     systemInfoEl.querySelector("#system-info-rendering-devices").innerHTML = activeGPUs.join("</br>")
+
+    // tensorRT
+    if (devices.active && testDiffusers.checked && devices.enable_trt === true) {
+        let nvidiaGPUs = Object.keys(devices.active).filter((d) => {
+            let gpuName = devices.active[d].name
+            gpuName = gpuName.toLowerCase()
+            return (
+                gpuName.includes("nvidia") ||
+                gpuName.includes("geforce") ||
+                gpuName.includes("quadro") ||
+                gpuName.includes("tesla")
+            )
+        })
+        if (nvidiaGPUs.length > 0) {
+            document.querySelector("#install-extras-container").classList.remove("displayNone")
+        }
+    }
 }
 
 function setHostInfo(hosts) {
@@ -664,7 +763,7 @@ saveSettingsBtn.addEventListener("click", function() {
         update_branch: updateBranch,
     }
 
-    document.querySelectorAll('#system-settings [data-setting-id]').forEach((parameterRow) => {
+    document.querySelectorAll("#system-settings [data-setting-id]").forEach((parameterRow) => {
         if (parameterRow.dataset.saveInAppConfig === "true") {
             const parameterElement =
                 document.getElementById(parameterRow.dataset.settingId) ||
@@ -703,20 +802,33 @@ saveSettingsBtn.addEventListener("click", function() {
     Promise.all([savePromise, asyncDelay(300)]).then(() => saveSettingsBtn.classList.remove("active"))
 })
 
-listenToNetworkField.addEventListener("change", debounce( ()=>{
-    saveSettingsBtn.click()
-}, 1000))
+listenToNetworkField.addEventListener(
+    "change",
+    debounce(() => {
+        saveSettingsBtn.click()
+    }, 1000)
+)
 
-listenPortField.addEventListener("change", debounce( ()=>{
-    saveSettingsBtn.click()
-}, 1000))
+listenPortField.addEventListener(
+    "change",
+    debounce(() => {
+        saveSettingsBtn.click()
+    }, 1000)
+)
 
 let copyCloudflareAddressBtn = document.querySelector("#copy-cloudflare-address")
 let cloudflareAddressField = document.getElementById("cloudflare-address")
 
-copyCloudflareAddressBtn.addEventListener("click", (e) => {
-    navigator.clipboard.writeText(cloudflareAddressField.innerHTML)
-    showToast("Copied server address to clipboard")
+navigator.permissions.query({ name: "clipboard-write" }).then(function(result) {
+    if (result.state === "granted") {
+        // you can read from the clipboard
+        copyCloudflareAddressBtn.addEventListener("click", (e) => {
+            navigator.clipboard.writeText(cloudflareAddressField.innerHTML)
+            showToast("Copied server address to clipboard")
+        })
+    } else {
+        copyCloudflareAddressBtn.classList.add("displayNone")
+    }
 })
 
 document.addEventListener("system_info_update", (e) => setDeviceInfo(e.detail))

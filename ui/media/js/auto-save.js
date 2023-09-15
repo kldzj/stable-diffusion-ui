@@ -15,16 +15,12 @@ const SETTINGS_IDS_LIST = [
     "stable_diffusion_model",
     "clip_skip",
     "vae_model",
-    "hypernetwork_model",
-    "lora_model",
     "sampler_name",
     "width",
     "height",
     "num_inference_steps",
     "guidance_scale",
     "prompt_strength",
-    "hypernetwork_strength",
-    "lora_alpha",
     "tiling",
     "output_format",
     "output_quality",
@@ -47,6 +43,7 @@ const SETTINGS_IDS_LIST = [
     "sound_toggle",
     "vram_usage_level",
     "confirm_dangerous_actions",
+    "profileName",
     "metadata_output_format",
     "auto_save_settings",
     "apply_color_correction",
@@ -56,9 +53,17 @@ const SETTINGS_IDS_LIST = [
     "zip_toggle",
     "tree_toggle",
     "json_toggle",
+    "extract_lora_from_prompt",
+    "embedding-card-size-selector",
+    "lora_model",
 ]
 
 const IGNORE_BY_DEFAULT = ["prompt"]
+
+if (!testDiffusers.checked) {
+    SETTINGS_IDS_LIST.push("hypernetwork_model")
+    SETTINGS_IDS_LIST.push("hypernetwork_strength")
+}
 
 const SETTINGS_SECTIONS = [
     // gets the "keys" property filled in with an ordered list of settings in this section via initSettings
@@ -176,13 +181,14 @@ function loadSettings() {
         // So this is likely the first time Easy Diffusion is running.
         // Initialize vram_usage_level based on the available VRAM
         function initGPUProfile(event) {
-            if (    "detail" in event 
-                && "active" in event.detail
-                && "cuda:0" in event.detail.active
-                && event.detail.active["cuda:0"].mem_total <4.5 )
-            {
-               vramUsageLevelField.value = "low"
-               vramUsageLevelField.dispatchEvent(new Event("change"))
+            if (
+                "detail" in event &&
+                "active" in event.detail &&
+                "cuda:0" in event.detail.active &&
+                event.detail.active["cuda:0"].mem_total < 4.5
+            ) {
+                vramUsageLevelField.value = "low"
+                vramUsageLevelField.dispatchEvent(new Event("change"))
             }
             document.removeEventListener("system_info_update", initGPUProfile)
         }
